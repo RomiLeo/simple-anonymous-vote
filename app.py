@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import secrets
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -78,26 +77,8 @@ def init_db() -> None:
         conn.commit()
 
 
-def read_query_voter_id() -> str | None:
-    value = st.query_params.get("voter")
-    if isinstance(value, list):
-        value = value[0] if value else None
-    return value or None
-
-
-def ensure_voter_id() -> str:
-    if "voter_id" in st.session_state:
-        return st.session_state["voter_id"]
-
-    voter_id = read_query_voter_id()
-    if voter_id:
-        st.session_state["voter_id"] = voter_id
-        return voter_id
-
-    voter_id = secrets.token_urlsafe(32)
-    st.query_params["voter"] = voter_id
-    st.session_state["voter_id"] = voter_id
-    return voter_id
+def normalize_voter_code(raw_code: str) -> str:
+    return " ".join(raw_code.strip().split()).casefold()
 
 
 def clean_options(raw: str) -> list[str]:
@@ -337,24 +318,40 @@ def render_agenda_list(voter_hash: str) -> None:
         render_agenda_card(agenda, voter_hash)
 
 
-def render_sidebar(voter_hash: str) -> None:
+def render_sidebar() -> str | None:
     st.sidebar.title(APP_TITLE)
-    st.sidebar.caption("익명 ID는 현재 접속 URL에 저장돼.")
-    st.sidebar.code(voter_hash[:12], language=None)
+    st.sidebar.caption("익명 투표 코드는 저장하지 않고 해시만 사용해.")
+    raw_code = st.sidebar.text_input(
+        "익명 투표 코드",
+        type="password",
+        placeholder="매번 같은 코드를 입력해줘",
+        help="같은 코드를 쓰면 같은 사람으로 처리돼. DB에는 코드 원문이 저장되지 않아.",
+    )
+
+    voter_code = normalize_voter_code(raw_code)
+    voter_hash = digest(f"voter-code:{voter_code}") if voter_code else None
+
+    if voter_hash:
+        st.sidebar.caption("현재 익명 ID")
+        st.sidebar.code(voter_hash[:12], language=None)
+
     st.sidebar.divider()
     st.sidebar.write("투표 전에는 현황을 숨기고, 투표 후에는 바로 보여줘.")
-    st.sidebar.write("URL의 voter 값을 지우거나 다른 주소로 접속하면 같은 사람인지 확인할 수 없어.")
+    st.sidebar.write("같은 의제에는 같은 익명 코드로 한 번만 투표할 수 있어.")
+
+    return voter_hash
 
 
 def main() -> None:
     init_db()
-    voter_id = ensure_voter_id()
-    voter_hash = digest(voter_id)
-
-    render_sidebar(voter_hash)
+    voter_hash = render_sidebar()
 
     st.title(APP_TITLE)
-    st.write("누구나 의제를 만들고, 한 의제에는 한 번만 익명으로 투표할 수 있어.")
+    st.write("누구나 의제를 만들고, 한 의제에는 같은 익명 코드로 한 번만 투표할 수 있어.")
+
+    if voter_hash is None:
+        st.info("왼쪽 사이드바에서 익명 투표 코드를 먼저 입력해줘.")
+        st.stop()
 
     create_tab, vote_tab = st.tabs(["의제 만들기", "투표하기"])
     with create_tab:
