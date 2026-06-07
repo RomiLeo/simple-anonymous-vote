@@ -84,7 +84,6 @@ def init_db() -> None:
         conn.commit()
 
 
-@st.cache_resource
 def cookie_manager():
     if stx is None:
         return None
