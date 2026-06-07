@@ -7,6 +7,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -14,6 +15,19 @@ import streamlit as st
 APP_TITLE = "간이 익명투표"
 DB_PATH = Path(os.getenv("VOTE_DB_PATH", "data/votes.db"))
 KST = timezone(timedelta(hours=9))
+RAINBOW_COLORS = [
+    ("빨강", "#EF4444"),
+    ("주황", "#F97316"),
+    ("노랑", "#EAB308"),
+    ("초록", "#22C55E"),
+    ("파랑", "#3B82F6"),
+    ("남색", "#1D4ED8"),
+    ("보라", "#A855F7"),
+]
+RAINBOW_COLOR_NAMES = [name for name, _ in RAINBOW_COLORS]
+RAINBOW_COLOR_BY_NAME = dict(RAINBOW_COLORS)
+RAINBOW_NAME_BY_COLOR = {color: name for name, color in RAINBOW_COLORS}
+DEFAULT_COLOR = RAINBOW_COLORS[4][1]
 
 
 st.set_page_config(
@@ -58,6 +72,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 agenda_id INTEGER NOT NULL,
                 label TEXT NOT NULL,
+                color TEXT NOT NULL DEFAULT '#3B82F6',
                 sort_order INTEGER NOT NULL,
                 FOREIGN KEY (agenda_id) REFERENCES agendas(id) ON DELETE CASCADE
             );
@@ -74,11 +89,22 @@ def init_db() -> None:
             );
             """
         )
+        option_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(options)").fetchall()
+        }
+        if "color" not in option_columns:
+            conn.execute(
+                f"ALTER TABLE options ADD COLUMN color TEXT NOT NULL DEFAULT '{DEFAULT_COLOR}'"
+            )
         conn.commit()
 
 
 def normalize_voter_code(raw_code: str) -> str:
     return " ".join(raw_code.strip().split()).casefold()
+
+
+def color_name_for_hex(color: str) -> str:
+    return RAINBOW_NAME_BY_COLOR.get(color, color)
 
 
 def clean_options(raw: str) -> list[str]:
@@ -99,6 +125,7 @@ def create_agenda(
     title: str,
     description: str,
     option_labels: list[str],
+    option_colors: list[str],
     voter_hash: str,
 ) -> int:
     with closing(get_connection()) as conn:
@@ -112,11 +139,18 @@ def create_agenda(
         agenda_id = int(cursor.lastrowid)
         conn.executemany(
             """
-            INSERT INTO options (agenda_id, label, sort_order)
-            VALUES (?, ?, ?)
+            INSERT INTO options (agenda_id, label, color, sort_order)
+            VALUES (?, ?, ?, ?)
             """,
             [
-                (agenda_id, label, index)
+                (
+                    agenda_id,
+                    label,
+                    option_colors[index - 1]
+                    if index - 1 < len(option_colors)
+                    else DEFAULT_COLOR,
+                    index,
+                )
                 for index, label in enumerate(option_labels, start=1)
             ],
         )
@@ -148,7 +182,7 @@ def get_options(agenda_id: int) -> list[sqlite3.Row]:
     with closing(get_connection()) as conn:
         return conn.execute(
             """
-            SELECT id, label
+            SELECT id, label, color
             FROM options
             WHERE agenda_id = ?
             ORDER BY sort_order, id
@@ -189,6 +223,7 @@ def get_results(agenda_id: int) -> pd.DataFrame:
             """
             SELECT
                 o.label,
+                o.color,
                 COUNT(v.id) AS votes
             FROM options o
             LEFT JOIN votes v ON v.option_id = o.id
@@ -201,11 +236,13 @@ def get_results(agenda_id: int) -> pd.DataFrame:
 
     df = pd.DataFrame([dict(row) for row in rows])
     if df.empty:
-        return pd.DataFrame(columns=["선택지", "득표", "비율"])
+        return pd.DataFrame(columns=["선택지", "색상", "득표", "비율"])
 
     total = int(df["votes"].sum())
     df["ratio"] = 0.0 if total == 0 else df["votes"] / total
-    df = df.rename(columns={"label": "선택지", "votes": "득표", "ratio": "비율"})
+    df = df.rename(
+        columns={"label": "선택지", "color": "색상", "votes": "득표", "ratio": "비율"}
+    )
     return df
 
 
@@ -218,43 +255,97 @@ def render_results(agenda_id: int) -> None:
         st.info("아직 집계된 표가 없어.")
         return
 
-    chart_df = df.set_index("선택지")[["득표"]]
-    st.bar_chart(chart_df, use_container_width=True)
+    chart = (
+        alt.Chart(df)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .encode(
+            x=alt.X("선택지:N", sort=None, title=None),
+            y=alt.Y("득표:Q", title="득표"),
+            color=alt.Color(
+                "선택지:N",
+                scale=alt.Scale(
+                    domain=df["선택지"].tolist(),
+                    range=df["색상"].tolist(),
+                ),
+                legend=None,
+            ),
+            tooltip=["선택지:N", "득표:Q"],
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
 
     display_df = df.copy()
+    display_df["색상"] = display_df["색상"].map(color_name_for_hex)
     display_df["비율"] = display_df["비율"].map(lambda value: f"{value:.1%}")
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
 def render_create_form(voter_hash: str) -> None:
     st.subheader("의제 만들기")
-    with st.form("create_agenda", clear_on_submit=True):
-        title = st.text_input("의제", placeholder="예: 다음 모임 날짜를 언제로 할까?")
-        description = st.text_area(
-            "설명",
-            placeholder="필요하면 배경이나 조건을 적어줘.",
-            height=90,
-        )
-        raw_options = st.text_area(
-            "선택지",
-            value="찬성\n반대\n기권",
-            help="줄바꿈이나 쉼표로 구분해. 최소 2개가 필요해.",
-            height=110,
-        )
-        submitted = st.form_submit_button("의제 올리기", type="primary")
+    title = st.text_input("의제", placeholder="예: 다음 모임 날짜를 언제로 할까?")
+    description = st.text_area(
+        "설명",
+        placeholder="필요하면 배경이나 조건을 적어줘.",
+        height=90,
+    )
+    raw_options = st.text_area(
+        "후보",
+        value="찬성\n반대\n기권",
+        help="줄바꿈이나 쉼표로 구분해. 최소 2개가 필요해.",
+        height=110,
+    )
+
+    options = clean_options(raw_options)
+    selected_colors: list[str] = []
+    if options:
+        st.caption("후보 색상")
+        for index, label in enumerate(options):
+            default_index = index % len(RAINBOW_COLORS)
+            option_key = digest(f"{index}:{label}")[:10]
+            color_column, preview_column = st.columns([3, 1])
+            with color_column:
+                color_name = st.selectbox(
+                    label,
+                    RAINBOW_COLOR_NAMES,
+                    index=default_index,
+                    key=f"color_{option_key}",
+                )
+            selected_color = RAINBOW_COLOR_BY_NAME[color_name]
+            selected_colors.append(selected_color)
+            with preview_column:
+                st.markdown(
+                    f"""
+                    <div style="
+                        width: 100%;
+                        height: 2.35rem;
+                        margin-top: 1.7rem;
+                        border-radius: 6px;
+                        background: {selected_color};
+                        border: 1px solid rgba(0,0,0,.12);
+                    "></div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+    submitted = st.button("의제 올리기", type="primary")
 
     if not submitted:
         return
 
-    options = clean_options(raw_options)
     if not title.strip():
         st.error("의제를 입력해줘.")
         return
     if len(options) < 2:
-        st.error("선택지는 최소 2개가 필요해.")
+        st.error("후보는 최소 2개가 필요해.")
         return
 
-    agenda_id = create_agenda(title.strip(), description.strip(), options, voter_hash)
+    agenda_id = create_agenda(
+        title.strip(),
+        description.strip(),
+        options,
+        selected_colors,
+        voter_hash,
+    )
     st.success("의제를 올렸어. 이제 목록에서 투표할 수 있어.")
     st.session_state["selected_agenda_id"] = agenda_id
     st.rerun()
