@@ -11,14 +11,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-try:
-    import extra_streamlit_components as stx
-except ImportError:  # pragma: no cover - Streamlit Cloud installs requirements.txt
-    stx = None
-
 
 APP_TITLE = "간이 익명투표"
-COOKIE_NAME = "simple_vote_anonymous_id"
 DB_PATH = Path(os.getenv("VOTE_DB_PATH", "data/votes.db"))
 KST = timezone(timedelta(hours=9))
 
@@ -84,12 +78,6 @@ def init_db() -> None:
         conn.commit()
 
 
-def cookie_manager():
-    if stx is None:
-        return None
-    return stx.CookieManager()
-
-
 def read_query_voter_id() -> str | None:
     value = st.query_params.get("voter")
     if isinstance(value, list):
@@ -98,28 +86,18 @@ def read_query_voter_id() -> str | None:
 
 
 def ensure_voter_id() -> str:
-    manager = cookie_manager()
-
-    if manager is not None:
-        voter_id = manager.get(cookie=COOKIE_NAME)
-        if voter_id:
-            return voter_id
-
-        voter_id = secrets.token_urlsafe(32)
-        manager.set(
-            COOKIE_NAME,
-            voter_id,
-            expires_at=datetime.now() + timedelta(days=3650),
-        )
-        st.rerun()
+    if "voter_id" in st.session_state:
+        return st.session_state["voter_id"]
 
     voter_id = read_query_voter_id()
     if voter_id:
+        st.session_state["voter_id"] = voter_id
         return voter_id
 
     voter_id = secrets.token_urlsafe(32)
     st.query_params["voter"] = voter_id
-    st.rerun()
+    st.session_state["voter_id"] = voter_id
+    return voter_id
 
 
 def clean_options(raw: str) -> list[str]:
@@ -361,11 +339,11 @@ def render_agenda_list(voter_hash: str) -> None:
 
 def render_sidebar(voter_hash: str) -> None:
     st.sidebar.title(APP_TITLE)
-    st.sidebar.caption("익명 ID는 이 브라우저에만 저장돼.")
+    st.sidebar.caption("익명 ID는 현재 접속 URL에 저장돼.")
     st.sidebar.code(voter_hash[:12], language=None)
     st.sidebar.divider()
     st.sidebar.write("투표 전에는 현황을 숨기고, 투표 후에는 바로 보여줘.")
-    st.sidebar.write("쿠키를 지우거나 다른 브라우저를 쓰면 같은 사람인지 확인할 수 없어.")
+    st.sidebar.write("URL의 voter 값을 지우거나 다른 주소로 접속하면 같은 사람인지 확인할 수 없어.")
 
 
 def main() -> None:
